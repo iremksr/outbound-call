@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../../../../.."
+		},
+		{
+			"path": "../../../../../../AISTUDIO/CV Doğrulama"
+		},
+		{
+			"path": "../../../../../../lumcall-twilio"
+		}
+	],
+	"settings": {}
+}

@@ -1,0 +1,118 @@
+import { MongoClient } from "mongodb";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+const MONGODB_URL = process.env.MONGODB_URL;
+const DATABASE_NAME = process.env.DATABASE_NAME || "chatai_db";
+
+if (!MONGODB_URL) {
+  console.error("Missing MONGODB_URL in environment");
+  process.exit(1);
+}
+
+let dbClient;
+let db;
+
+/**
+ * MongoDB bağlantısını başlatır ve tekil instance döner
+ */
+async function initDB() {
+  if (!dbClient) {
+    dbClient = new MongoClient(MONGODB_URL, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true
+    });
+    await dbClient.connect();
+    db = dbClient.db(DATABASE_NAME);
+    // Bağlantı testi
+    await db.command({ ping: 1 });
+    console.log(`MongoDB bağlantısı başarılı: ${DATABASE_NAME}`);
+  }
+  return db;
+}
+
+/**
+ * Telefon numarasını temizler ve uluslararası formata getirir
+ */
+function cleanPhoneNumber(rawNumber) {
+  if (!rawNumber) return null;
+  let cleaned = rawNumber.replace(/\s+/g, "");
+  // 10 haneli ise başına +90 ekle
+  if (cleaned.length === 10) {
+    cleaned = `+90${cleaned}`;
+  } else if (cleaned.length > 10) {
+    if (!cleaned.startsWith("+90")) {
+      cleaned = `+90${cleaned.slice(-10)}`;
+    }
+  }
+  return cleaned;
+}
+
+/**
+ * "Aranacak" durumundaki dökümanlardaki numaraları döner
+ */
+async function callQueue() {
+  const database = await initDB();
+  const collection = database.collection("parsed_cv_data");
+
+  const queue = [];
+  const cursor = collection.find({ durum: "Aranacak" });
+
+  // 3) Toplam belge sayısı
+  const total = await collection.countDocuments();
+  const filtered = await collection.countDocuments({ durum: "Aranacak" });
+  console.log(`Toplam doküman: ${total}, durum=Aranacak olan: ${filtered}`);
+
+  await cursor.forEach(doc => {
+    const raw = doc.parsed_data?.["Kişisel Bilgiler"]?.["Telefon Numarası"];
+    const number = cleanPhoneNumber(raw);
+    if (number) {
+      queue.push({ number, docId: doc._id });
+    }
+  });
+
+  console.log("Queue:", queue);
+  return queue;
+}
+
+/**
+ * Bir dökümanda null/undefined alanları bulur ve path listesini döner
+ */
+async function extractNullValues(filename = "Sinan_imek_1010685780.pdf") {
+  const database = await initDB();
+  const collection = database.collection("parsed_cv_data");
+
+  const doc = await collection.findOne({ filename });
+  if (!doc) {
+    return { error: `parsed CV verisi bulunamadı: ${filename}` };
+  }
+
+  function findNulls(data, path = "") {
+    const results = [];
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      for (const [key, value] of Object.entries(data)) {
+        const fullPath = path ? `${path}.${key}` : key;
+        if (value === null || value === undefined) {
+          results.push(fullPath);
+        } else {
+          results.push(...findNulls(value, fullPath));
+        }
+      }
+    } else if (Array.isArray(data)) {
+      data.forEach((item, idx) => {
+        const fullPath = `${path}[${idx}]`;
+        results.push(...findNulls(item, fullPath));
+      });
+    }
+    return results;
+  }
+
+  const parsed = doc.parsed_data || {};
+  const nullFields = findNulls(parsed);
+  const name = parsed["Kişisel Bilgiler"]?.["Ad Soyad"] || "Bulunamadı";
+
+  return { filename, name, null_fields: nullFields };
+}
+
+export { initDB, cleanPhoneNumber, callQueue, extractNullValues };

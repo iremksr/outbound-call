@@ -1,0 +1,23 @@
+{
+  "name": "convai-twilio",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "ElevenLabs",
+  "license": "ISC",
+  "description": "This demo shows how to integrate ElevenLabs Conversational AI with Twilio to create an interactive voice agent that can handle inbound and outbound phone calls.",
+  "type": "module",
+  "dependencies": {
+    "@fastify/formbody": "^8.0.2",
+    "@fastify/static": "^8.2.0",
+    "@fastify/websocket": "^11.1.0",
+    "dotenv": "^16.6.1",
+    "fastify": "^5.4.0",
+    "mongodb": "^6.17.0",
+    "twilio": "^5.7.1",
+    "ws": "^8.18.3"
+  },
+  "keywords": []
+}
