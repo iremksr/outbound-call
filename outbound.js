@@ -1,4 +1,3 @@
-
 import Fastify from "fastify";
 import WebSocket from "ws";
 import dotenv from "dotenv";
@@ -66,7 +65,6 @@ fastify.post("/call-status", async (req, reply) => {
   }
   reply.send("");
 });
-
 
 async function updateCallStatus(docId, status) {
   const database = await initDB();
@@ -152,7 +150,7 @@ async function getSignedUrl() {
 
 // Route to initiate single outbound call
 fastify.post("/outbound-call", async (request, reply) => {
-  const { number, prompt, first_message } = request.body;
+  const { number } = request.body;
 
   if (!number) {
     return reply.code(400).send({ error: "Phone number is required" });
@@ -162,17 +160,11 @@ fastify.post("/outbound-call", async (request, reply) => {
     const call = await twilioClient.calls.create({
       from: TWILIO_PHONE_NUMBER,
       to: number,
-      url: `https://${
-        request.headers.host
-      }/outbound-call-twiml?prompt=${encodeURIComponent(
-        prompt || ""
-      )}&first_message=${encodeURIComponent(first_message || "")}`,
-
-      statusCallback: `https://${request.headers.host}/call-status?docId=${docId}`,
+      url: `https://${request.headers.host}/outbound-call-twiml`,
+      statusCallback: `https://${request.headers.host}/call-status`,
       statusCallbackEvent: ["completed", "no-answer", "busy", "failed", "canceled"],
       statusCallbackMethod: "POST",
       machineDetection: "Enable" 
-
     });
 
     reply.send({
@@ -191,11 +183,9 @@ fastify.post("/outbound-call", async (request, reply) => {
 
 // Route to initiate bulk calls from database
 fastify.post("/bulk-calls", async (request, reply) => {
-  // Body’den parametreleri al
+  // Body'den parametreleri al
   const {
     numbers = [],
-    prompt = "",
-    first_message = "",
     concurrent = false,
     delay = 5000
   } = request.body;
@@ -226,15 +216,13 @@ fastify.post("/bulk-calls", async (request, reply) => {
       twilioClient.calls.create({
         from: TWILIO_PHONE_NUMBER,
         to: number,
-        url: `https://${host}/outbound-call-twiml?prompt=${encodeURIComponent(prompt)}&first_message=${encodeURIComponent(first_message)}&docId=${docId}&name=${encodeURIComponent(name)}`,
-
+        url: `https://${host}/outbound-call-twiml?docId=${docId}&name=${encodeURIComponent(name)}`,
         statusCallback: `https://${request.headers.host}/call-status?docId=${docId}`,
         statusCallbackEvent: ["completed", "no-answer", "busy", "failed", "canceled"],
         statusCallbackMethod: "POST",
         machineDetection: "Enable" 
       })
       .then(call => {
-        //if (docId) updateCallStatus(docId, "Arandı");
         return { number, name, callSid: call.sid, status: "queued" };
       })
       .catch(err => ({ number, name, status: "failed", error: err.message }))
@@ -248,16 +236,13 @@ fastify.post("/bulk-calls", async (request, reply) => {
         const call = await twilioClient.calls.create({
           from: TWILIO_PHONE_NUMBER,
           to: number,
-          url: `https://${host}/outbound-call-twiml?prompt=${encodeURIComponent(prompt)}&first_message=${encodeURIComponent(first_message)}&docId=${docId}&name=${encodeURIComponent(name)}`,
-
+          url: `https://${host}/outbound-call-twiml?docId=${docId}&name=${encodeURIComponent(name)}`,
           statusCallback: `https://${request.headers.host}/call-status?docId=${docId}`,
           statusCallbackEvent: ["completed", "no-answer", "busy", "failed", "canceled"],
           statusCallbackMethod: "POST",
           machineDetection: "Enable" 
         });
 
-
-        //if (docId) await updateCallStatus(docId, "Arandı");
         results.push({ number, name, callSid: call.sid, status: "queued" });
         if (i < queue.length - 1) await new Promise(r => setTimeout(r, delay));
       } catch (err) {
@@ -296,13 +281,10 @@ fastify.get("/call-queue", async (request, reply) => {
 
 // TwiML route for outbound calls
 fastify.all("/outbound-call-twiml", async (request, reply) => {
-  const prompt = request.query.prompt || "";
-  const first_message = request.query.first_message || "";
   const docId = request.query.docId || "";
   const name = request.query.name || "";
 
   console.log(`[TwiML] Webhook called for ${name} - Host: ${request.headers.host}`);
-  console.log(`[TwiML] Parameters: prompt=${prompt.substring(0, 50)}..., first_message=${first_message.substring(0, 30)}...`);
 
   // WebSocket URL'ini kontrol et
   const wsUrl = `wss://${request.headers.host}/outbound-media-stream`;
@@ -312,8 +294,6 @@ fastify.all("/outbound-call-twiml", async (request, reply) => {
       <Response>
         <Connect>
           <Stream url="${wsUrl}">
-            <Parameter name="prompt" value="${prompt}" />
-            <Parameter name="first_message" value="${first_message}" />
             <Parameter name="docId" value="${docId}" />
             <Parameter name="name" value="${name}" />
           </Stream>
@@ -348,33 +328,7 @@ fastify.register(async fastifyInstance => {
 
           elevenLabsWs.on("open", () => {
             console.log("[ElevenLabs] Connected to Conversational AI");
-
-            // Send initial configuration with prompt and first message
-            const initialConfig = {
-              type: "conversation_initiation_client_data",
-              conversation_config_override: {
-                agent: {
-                  prompt: {
-                    prompt:
-                      customParameters?.prompt ||
-                      `You are Gary from the phone store. Start by saying hello, then use the extract_null_values tool to get the customer's information. After getting their info, greet them by name and ask about any missing information from their CV.`,
-                  },
-                  first_message:
-                    customParameters?.first_message ||
-                    "hey there! how can I help you today?",
-                },
-              },
-            };
-
-            console.log(
-              `[ElevenLabs] Calling ${customParameters?.name || 'Unknown'} - Sending initial config with prompt:`,
-              initialConfig.conversation_config_override.agent.prompt.prompt
-            );
-
-            // Send the configuration to ElevenLabs
-            elevenLabsWs.send(JSON.stringify(initialConfig));
-            
-            console.log("[ElevenLabs] Configuration sent. Agent will call tools automatically after greeting.");
+            console.log(`[ElevenLabs] Calling ${customParameters?.name || 'Unknown'} - Using agent configuration from ElevenLabs`);
           });
 
           elevenLabsWs.on("message", async (data) => {
