@@ -6,7 +6,7 @@ import fastifyFormBody from "@fastify/formbody";
 import fastifyWs from "@fastify/websocket";
 import Twilio from "twilio";
 import { MongoClient, ObjectId } from "mongodb";
-import { callQueue, initDB } from "./functions.js";
+import { callQueue, initDB, extractNullValues } from "./functions.js";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -357,7 +357,7 @@ fastify.register(async fastifyInstance => {
                   prompt: {
                     prompt:
                       customParameters?.prompt ||
-                      "you are a gary from the phone store",
+                      `You are Gary from the phone store. Start by saying hello, then use the extract_null_values tool to get the customer's information. After getting their info, greet them by name and ask about any missing information from their CV.`,
                   },
                   first_message:
                     customParameters?.first_message ||
@@ -373,9 +373,11 @@ fastify.register(async fastifyInstance => {
 
             // Send the configuration to ElevenLabs
             elevenLabsWs.send(JSON.stringify(initialConfig));
+            
+            console.log("[ElevenLabs] Configuration sent. Agent will call tools automatically after greeting.");
           });
 
-          elevenLabsWs.on("message", data => {
+          elevenLabsWs.on("message", async (data) => {
             try {
               const message = JSON.parse(data);
 
@@ -446,9 +448,60 @@ fastify.register(async fastifyInstance => {
                   );
                   break;
 
+                case "tool_response":
+                  console.log("[ElevenLabs] Tool response received:", message);
+                  break;
+
+                case "tool_call":
+                  console.log("[ElevenLabs] Tool call received:", message);
+                  
+                  // Tool call'ı handle et
+                  if (message.tool_call?.name === "extract_null_values") {
+                    console.log("[Tool] Executing extract_null_values with docId:", customParameters?.docId);
+                    
+                    // customParameters'den docId'yi al
+                    const docId = customParameters?.docId;
+                    if (!docId) {
+                      console.error("[Tool] No docId found in customParameters");
+                      const errorResponse = {
+                        type: "tool_response",
+                        tool_call_id: message.tool_call.id,
+                        error: "Document ID not found"
+                      };
+                      elevenLabsWs.send(JSON.stringify(errorResponse));
+                      return;
+                    }
+                    
+                    // Burada kendi fonksiyonunuzu çağırın
+                    try {
+                      const result = await extractNullValues(docId);
+                      
+                      // Sonucu ElevenLabs'e geri gönder
+                      const toolResponse = {
+                        type: "tool_response",
+                        tool_call_id: message.tool_call.id,
+                        response: JSON.stringify(result)
+                      };
+                      
+                      elevenLabsWs.send(JSON.stringify(toolResponse));
+                      console.log("[Tool] Response sent:", result);
+                    } catch (error) {
+                      console.error("[Tool] Error executing extract_null_values:", error);
+                      
+                      const errorResponse = {
+                        type: "tool_response",
+                        tool_call_id: message.tool_call.id,
+                        error: error.message
+                      };
+                      
+                      elevenLabsWs.send(JSON.stringify(errorResponse));
+                    }
+                  }
+                  break;
+
                 default:
                   console.log(
-                    `[ElevenLabs] Unhandled message type: ${message.type}`
+                    `[ElevenLabs] Unhandled message type: ${message.type}`, message
                   );
               }
             } catch (error) {
@@ -468,9 +521,6 @@ fastify.register(async fastifyInstance => {
         }
       };
 
-      // Set up ElevenLabs connection
-      setupElevenLabs();
-
       // Handle messages from Twilio
       ws.on("message", message => {
         try {
@@ -484,13 +534,15 @@ fastify.register(async fastifyInstance => {
               streamSid = msg.start.streamSid;
               callSid = msg.start.callSid;
               customParameters = msg.start.customParameters;
-              // Doğru AnsweredBy kontrolü burada!
+              
+              // AnsweredBy kontrolü
               const answeredBy = customParameters?.AnsweredBy;
               if (answeredBy && answeredBy !== "human") {
                 console.warn(`[Server] Call did not connect to a human (AnsweredBy=${answeredBy}), skipping ElevenLabs setup.`);
                 ws.close();
                 return;
               }
+              
               // Sadece insan açtıysa ElevenLabs bağlantısı başlat
               setupElevenLabs();
               console.log(

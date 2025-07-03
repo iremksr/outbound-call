@@ -1,4 +1,4 @@
-import { MongoClient } from "mongodb";
+import { MongoClient, ObjectId } from "mongodb";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -79,13 +79,13 @@ async function callQueue() {
 /**
  * Bir dökümanda null/undefined alanları bulur ve path listesini döner
  */
-async function extractNullValues(filename = "Sinan_imek_1010685780.pdf") {
+async function extractNullValues(_id) {
   const database = await initDB();
   const collection = database.collection("parsed_cv_data");
 
-  const doc = await collection.findOne({ filename });
+  const doc = await collection.findOne({ _id: new ObjectId(_id) });
   if (!doc) {
-    return { error: `parsed CV verisi bulunamadı: ${filename}` };
+    return { error: `parsed CV verisi bulunamadı: ${_id}` };
   }
 
   function findNulls(data, path = "") {
@@ -112,7 +112,9 @@ async function extractNullValues(filename = "Sinan_imek_1010685780.pdf") {
   const nullFields = findNulls(parsed);
   const name = parsed["Kişisel Bilgiler"]?.["Ad Soyad"] || "Bulunamadı";
 
-  return { filename, name, null_fields: nullFields };
+  
+  return{_id, name, nullFields, parsedData: parsed}
 }
+
 
 export { initDB, cleanPhoneNumber, callQueue, extractNullValues };
