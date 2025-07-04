@@ -40,30 +40,55 @@ fastify.register(fastifyWs);
 
 const PORT = process.env.PORT || 8000;
 
-// Status callback endpoint
+// Status callback endpoint - GELİŞTİRİLMİŞ VERSİYON
 fastify.post("/call-status", async (req, reply) => {
-  const { CallSid, CallStatus, AnsweredBy } = req.body;
+  const { CallSid, CallStatus, AnsweredBy, CallDuration } = req.body;
   const docId = req.body.CustomParameterDocId || req.query.docId;
-  fastify.log.info(`StatusCallback for ${CallSid}: ${CallStatus}, AnsweredBy: ${AnsweredBy}, docId: ${docId}`);
-  console.log(`StatusCallback for ${CallSid}: ${CallStatus}, AnsweredBy: ${AnsweredBy}, docId: ${docId}`);
+  
+  console.log(`StatusCallback for ${CallSid}:`);
+  console.log(`  - Status: ${CallStatus}`);
+  console.log(`  - AnsweredBy: ${AnsweredBy}`);
+  console.log(`  - Duration: ${CallDuration}`);
+  console.log(`  - DocId: ${docId}`);
 
   let yeniDurum;
-  if (["no-answer","busy","failed","canceled"].includes(CallStatus)) {
+  
+  // Daha detaylı durum kontrolü
+  if (["no-answer", "busy", "failed", "canceled"].includes(CallStatus)) {
     yeniDurum = "Arandı, Açmadı";
   } else if (CallStatus === "completed") {
-    if (AnsweredBy && AnsweredBy !== "human") {
+    // CallDuration kontrolü ekle
+    const duration = parseInt(CallDuration) || 0;
+    
+    if (AnsweredBy === "human" && duration > 5) {
+      // İnsan açtı ve 5 saniyeden uzun konuştu
+      yeniDurum = "Arandı";
+    } else if (AnsweredBy === "machine" || AnsweredBy === "fax") {
+      // Makine veya faks açtı
+      yeniDurum = "Arandı, Açmadı";
+    } else if (AnsweredBy === "unknown" && duration > 15) {
+      // Bilinmeyen ama uzun süre konuşuldu - muhtemelen insan
+      yeniDurum = "Arandı";
+    } else if (AnsweredBy === "unknown" && duration <= 15) {
+      // Bilinmeyen ve kısa süre - muhtemelen makine veya cevap vermedi
       yeniDurum = "Arandı, Açmadı";
     } else {
-      yeniDurum = "Arandı";
+      yeniDurum = "Arandı, Açmadı";
     }
+  } else if (CallStatus === "answered") {
+    // Answered durumunda AnsweredBy henüz gelmemiş olabilir
+    yeniDurum = "Arandı (Devam Ediyor)";
   } else {
     yeniDurum = `Arandı (${CallStatus})`;
   }
 
+  console.log(`  - Yeni Durum: ${yeniDurum}`);
+
   if (docId) {
     await updateCallStatus(docId, yeniDurum);
   }
-  reply.send("");
+  
+  reply.send("OK");
 });
 
 async function updateCallStatus(docId, status) {
@@ -222,7 +247,7 @@ async function getSignedUrl(docId = null) {
   }
 }
 
-// Route to initiate single outbound call
+// Route to initiate single outbound call - GELİŞTİRİLMİŞ VERSİYON
 fastify.post("/outbound-call", async (request, reply) => {
   const { number } = request.body;
 
@@ -236,9 +261,14 @@ fastify.post("/outbound-call", async (request, reply) => {
       to: number,
       url: `https://${request.headers.host}/outbound-call-twiml`,
       statusCallback: `https://${request.headers.host}/call-status`,
-      statusCallbackEvent: ["completed", "no-answer", "busy", "failed", "canceled"],
+      statusCallbackEvent: ["initiated", "ringing", "answered", "completed", "no-answer", "busy", "failed", "canceled"],
       statusCallbackMethod: "POST",
-      machineDetection: "Enable" 
+      machineDetection: "Enable",
+      machineDetectionTimeout: 30, // 30 saniye makine tespiti
+      machineDetectionSpeechThreshold: 2400, // 2.4 saniye konuşma eşiği
+      machineDetectionSpeechEndThreshold: 1200, // 1.2 saniye sessizlik eşiği
+      machineDetectionSilenceTimeout: 5000, // 5 saniye sessizlik timeout
+      timeout: 60 // Toplam arama timeout 60 saniye
     });
 
     reply.send({
@@ -255,7 +285,7 @@ fastify.post("/outbound-call", async (request, reply) => {
   }
 });
 
-// Route to initiate bulk calls from database
+// Route to initiate bulk calls from database - GELİŞTİRİLMİŞ VERSİYON
 fastify.post("/bulk-calls", async (request, reply) => {
   // Body'den parametreleri al
   const {
@@ -291,10 +321,15 @@ fastify.post("/bulk-calls", async (request, reply) => {
         from: TWILIO_PHONE_NUMBER,
         to: number,
         url: `https://${host}/outbound-call-twiml?docId=${docId}&name=${encodeURIComponent(name)}`,
-        statusCallback: `https://${request.headers.host}/call-status?docId=${docId}`,
-        statusCallbackEvent: ["completed", "no-answer", "busy", "failed", "canceled"],
+        statusCallback: `https://${host}/call-status?docId=${docId}`,
+        statusCallbackEvent: ["initiated", "ringing", "answered", "completed", "no-answer", "busy", "failed", "canceled"],
         statusCallbackMethod: "POST",
-        machineDetection: "Enable" 
+        machineDetection: "Enable",
+        machineDetectionTimeout: 30,
+        machineDetectionSpeechThreshold: 2400,
+        machineDetectionSpeechEndThreshold: 1200,
+        machineDetectionSilenceTimeout: 5000,
+        timeout: 60
       })
       .then(call => {
         return { number, name, callSid: call.sid, status: "queued" };
@@ -311,10 +346,15 @@ fastify.post("/bulk-calls", async (request, reply) => {
           from: TWILIO_PHONE_NUMBER,
           to: number,
           url: `https://${host}/outbound-call-twiml?docId=${docId}&name=${encodeURIComponent(name)}`,
-          statusCallback: `https://${request.headers.host}/call-status?docId=${docId}`,
-          statusCallbackEvent: ["completed", "no-answer", "busy", "failed", "canceled"],
+          statusCallback: `https://${host}/call-status?docId=${docId}`,
+          statusCallbackEvent: ["initiated", "ringing", "answered", "completed", "no-answer", "busy", "failed", "canceled"],
           statusCallbackMethod: "POST",
-          machineDetection: "Enable" 
+          machineDetection: "Enable",
+          machineDetectionTimeout: 30,
+          machineDetectionSpeechThreshold: 2400,
+          machineDetectionSpeechEndThreshold: 1200,
+          machineDetectionSilenceTimeout: 5000,
+          timeout: 60
         });
 
         results.push({ number, name, callSid: call.sid, status: "queued" });
@@ -377,7 +417,7 @@ fastify.all("/outbound-call-twiml", async (request, reply) => {
   reply.type("text/xml").send(twimlResponse);
 });
 
-// WebSocket route for handling media streams
+// WebSocket route for handling media streams - DÜZELTİLMİŞ VERSİYON
 fastify.register(async fastifyInstance => {
   fastifyInstance.get(
     "/outbound-media-stream",
@@ -403,7 +443,7 @@ fastify.register(async fastifyInstance => {
 
           elevenLabsWs.on("open", () => {
             console.log("[ElevenLabs] Connected to Conversational AI");
-            console.log(`[ElevenLabs] Calling ${customParameters?.name || 'Unknown'} - Using agent configuration from ElevenLabs`);
+            console.log(`[ElevenLabs] Calling ${customParameters?.docId || 'Unknown'} - Using agent configuration from ElevenLabs`);
           });
 
           elevenLabsWs.on("message", async (data) => {
@@ -467,13 +507,13 @@ fastify.register(async fastifyInstance => {
 
                 case "agent_response":
                   console.log(
-                    `[${customParameters?.name || 'Unknown'}] Agent response: ${message.agent_response_event?.agent_response}`
+                    `[${customParameters?.docId || 'Unknown'}] Agent response: ${message.agent_response_event?.agent_response}`
                   );
                   break;
 
                 case "user_transcript":
                   console.log(
-                    `[${customParameters?.name || 'Unknown'}] User transcript: ${message.user_transcription_event?.user_transcript}`
+                    `[${customParameters?.docId || 'Unknown'}] User transcript: ${message.user_transcription_event?.user_transcript}`
                   );
                   break;
 
@@ -550,7 +590,7 @@ fastify.register(async fastifyInstance => {
           });
 
           elevenLabsWs.on("close", () => {
-            console.log(`[ElevenLabs] Disconnected from ${customParameters?.name || 'Unknown'}`);        
+            console.log(`[ElevenLabs] Disconnected from ${customParameters?.docId || 'Unknown'}`);        
           });
         } catch (error) {
           console.error("[ElevenLabs] Setup error:", error);
@@ -571,18 +611,12 @@ fastify.register(async fastifyInstance => {
               callSid = msg.start.callSid;
               customParameters = msg.start.customParameters;
               
-              // AnsweredBy kontrolü
-              const answeredBy = customParameters?.AnsweredBy;
-              if (answeredBy && answeredBy !== "human") {
-                console.warn(`[Server] Call did not connect to a human (AnsweredBy=${answeredBy}), skipping ElevenLabs setup.`);
-                ws.close();
-                return;
-              }
+              // AnsweredBy kontrolü KALDIRILDI - bu bilgi WebSocket'te doğru şekilde mevcut değil
+              // Status callback'te yapılacak
               
-              // Sadece insan açtıysa ElevenLabs bağlantısı başlat
               setupElevenLabs();
               console.log(
-                `[Twilio] Stream started for ${customParameters?.name || 'Unknown'} (docId: ${customParameters?.docId || 'N/A'}) - StreamSid: ${streamSid}, CallSid: ${callSid}`
+                `[Twilio] Stream started for ${customParameters?.docId || 'Unknown'} (docId: ${customParameters?.docId || 'N/A'}) - StreamSid: ${streamSid}, CallSid: ${callSid}`
               );
               break;
 
@@ -599,7 +633,7 @@ fastify.register(async fastifyInstance => {
               break;
 
             case "stop":
-              console.log(`[Twilio] Stream ${streamSid} ended for ${customParameters?.name || 'Unknown'}`);
+              console.log(`[Twilio] Stream ${streamSid} ended for ${customParameters?.docId || 'Unknown'}`);
               if (elevenLabsWs?.readyState === WebSocket.OPEN) {
                 elevenLabsWs.close();
               }
@@ -615,7 +649,7 @@ fastify.register(async fastifyInstance => {
 
       // Handle WebSocket closure
       ws.on("close", () => {
-        console.log(`[Twilio] Client disconnected for ${customParameters?.name || 'Unknown'}`);
+        console.log(`[Twilio] Client disconnected for ${customParameters?.docId || 'Unknown'}`);
         if (elevenLabsWs?.readyState === WebSocket.OPEN) {
           elevenLabsWs.close();
         }
