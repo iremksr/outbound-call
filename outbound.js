@@ -123,11 +123,85 @@ fastify.get("/debug", async (request, reply) => {
 // Initialize Twilio client
 const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
+// Client tools definition - bu kısım önemli
+const clientTools = {
+  // ElevenLabs snake_case kullanıyor, o yüzden tool isimlerini ona göre ayarlıyoruz
+  extract_null_values: async ({ docId }) => {
+    console.log(`[Tool] Executing extract_null_values with docId: ${docId}`);
+    try {
+      const result = await extractNullValues(docId);
+      console.log(`[Tool] Extract result:`, result);
+      return result;
+    } catch (error) {
+      console.error(`[Tool] Error in extract_null_values:`, error);
+      throw error;
+    }
+  },
+
+  hello: () =>{
+    console.log("[Tool] Hello tool called");
+    return "Hello from the tool!";
+  },
+  
+  // Örnek: Müşteri detaylarını getir
+  get_customer_details: async ({ docId }) => {
+    console.log(`[Tool] Getting customer details for docId: ${docId}`);
+    try {
+      const database = await initDB();
+      const collection = database.collection("parsed_cv_data");
+      const customer = await collection.findOne({ _id: new ObjectId(docId) });
+      
+      if (!customer) {
+        return { error: "Customer not found" };
+      }
+      
+      return {
+        id: customer._id,
+        name: customer.name || "Unknown",
+        phone: customer.phone || "Unknown",
+        email: customer.email || "Unknown",
+        status: customer.durum || "Unknown"
+      };
+    } catch (error) {
+      console.error(`[Tool] Error getting customer details:`, error);
+      return { error: error.message };
+    }
+  },
+  
+  // Log mesajı için tool
+  log_message: async ({ message }) => {
+    console.log(`[Tool] Agent Log: ${message}`);
+    return { success: true, logged: message };
+  }
+};
+
 // Helper function to get signed URL for authenticated conversations
-async function getSignedUrl() {
+async function getSignedUrl(docId = null) {
   try {
+    // Tool'ları query parametresi olarak gönder
+    const toolsParam = encodeURIComponent(JSON.stringify({
+      extract_null_values: {
+        description: "Extract null or empty values from customer data",
+        parameters: {
+          docId: { type: "string", description: "Document ID to extract data from" }
+        }
+      },
+      get_customer_details: {
+        description: "Get customer details from database",
+        parameters: {
+          docId: { type: "string", description: "Document ID of the customer" }
+        }
+      },
+      log_message: {
+        description: "Log a message",
+        parameters: {
+          message: { type: "string", description: "Message to log" }
+        }
+      }
+    }));
+
     const response = await fetch(
-      `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}`,
+      `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}&tools=${toolsParam}`,
       {
         method: "GET",
         headers: {
@@ -282,9 +356,9 @@ fastify.get("/call-queue", async (request, reply) => {
 // TwiML route for outbound calls
 fastify.all("/outbound-call-twiml", async (request, reply) => {
   const docId = request.query.docId || "";
-  const name = request.query.name || "";
+  const name = decodeURIComponent(request.query.name || "");
 
-  console.log(`[TwiML] Webhook called for ${name} - Host: ${request.headers.host}`);
+  console.log(`[TwiML] Webhook called for ${name} (docId: ${docId}) - Host: ${request.headers.host}`);
 
   // WebSocket URL'ini kontrol et
   const wsUrl = `wss://${request.headers.host}/outbound-media-stream`;
@@ -323,7 +397,8 @@ fastify.register(async fastifyInstance => {
       // Set up ElevenLabs connection
       const setupElevenLabs = async () => {
         try {
-          const signedUrl = await getSignedUrl();
+          const docId = customParameters?.docId;
+          const signedUrl = await getSignedUrl(docId);
           elevenLabsWs = new WebSocket(signedUrl);
 
           elevenLabsWs.on("open", () => {
@@ -406,50 +481,57 @@ fastify.register(async fastifyInstance => {
                   console.log("[ElevenLabs] Tool response received:", message);
                   break;
 
-                case "tool_call":
-                  console.log("[ElevenLabs] Tool call received:", message);
+                case "client_tool_call":
+                  console.log("[ElevenLabs] Client tool call received:", message);
                   
-                  // Tool call'ı handle et
-                  if (message.tool_call?.name === "extract_null_values") {
-                    console.log("[Tool] Executing extract_null_values with docId:", customParameters?.docId);
-                    
-                    // customParameters'den docId'yi al
-                    const docId = customParameters?.docId;
-                    if (!docId) {
-                      console.error("[Tool] No docId found in customParameters");
-                      const errorResponse = {
-                        type: "tool_response",
-                        tool_call_id: message.tool_call.id,
-                        error: "Document ID not found"
-                      };
-                      elevenLabsWs.send(JSON.stringify(errorResponse));
-                      return;
-                    }
-                    
-                    // Burada kendi fonksiyonunuzu çağırın
+                  const toolName = message.client_tool_call?.tool_name;
+                  const toolCallId = message.client_tool_call?.tool_call_id;
+                  const parameters = message.client_tool_call?.parameters || {};
+                  
+                  if (clientTools[toolName]) {
                     try {
-                      const result = await extractNullValues(docId);
+                      console.log(`[Tool] Executing ${toolName} with parameters:`, parameters);
                       
-                      // Sonucu ElevenLabs'e geri gönder
+                      // DocId'yi customParameters'den al ve parametrelere ekle
+                      const docId = customParameters?.docId;
+                      if (docId && !parameters.docId) {
+                        parameters.docId = docId;
+                      }
+                      
+                      const result = await clientTools[toolName](parameters);
+                      
                       const toolResponse = {
-                        type: "tool_response",
-                        tool_call_id: message.tool_call.id,
-                        response: JSON.stringify(result)
+                        type: "client_tool_result",
+                        tool_call_id: toolCallId,
+                        result: JSON.stringify(result),
+                        is_error: false
                       };
                       
                       elevenLabsWs.send(JSON.stringify(toolResponse));
-                      console.log("[Tool] Response sent:", result);
+                      console.log(`[Tool] ${toolName} response sent to ElevenLabs`);
                     } catch (error) {
-                      console.error("[Tool] Error executing extract_null_values:", error);
+                      console.error(`[Tool] Error executing ${toolName}:`, error);
                       
                       const errorResponse = {
-                        type: "tool_response",
-                        tool_call_id: message.tool_call.id,
-                        error: error.message
+                        type: "client_tool_result",
+                        tool_call_id: toolCallId,
+                        result: JSON.stringify({ error: error.message }),
+                        is_error: true
                       };
                       
                       elevenLabsWs.send(JSON.stringify(errorResponse));
                     }
+                  } else {
+                    console.error(`[Tool] Unknown tool: ${toolName}`);
+                    
+                    const errorResponse = {
+                      type: "client_tool_result",
+                      tool_call_id: toolCallId,
+                      result: JSON.stringify({ error: `Unknown tool: ${toolName}` }),
+                      is_error: true
+                    };
+                    
+                    elevenLabsWs.send(JSON.stringify(errorResponse));
                   }
                   break;
 
@@ -500,7 +582,7 @@ fastify.register(async fastifyInstance => {
               // Sadece insan açtıysa ElevenLabs bağlantısı başlat
               setupElevenLabs();
               console.log(
-                `[Twilio] Stream started for ${customParameters?.name || 'Unknown'} - StreamSid: ${streamSid}, CallSid: ${callSid}`
+                `[Twilio] Stream started for ${customParameters?.name || 'Unknown'} (docId: ${customParameters?.docId || 'N/A'}) - StreamSid: ${streamSid}, CallSid: ${callSid}`
               );
               break;
 

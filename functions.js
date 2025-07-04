@@ -113,8 +113,13 @@ async function extractNullValues(_id) {
   const name = parsed["Kişisel Bilgiler"]?.["Ad Soyad"] || "Bulunamadı";
 
   
-  return{_id, name, nullFields, parsedData: parsed}
+  return (    {
+      name,
+      nullFields,
+      parsedData: parsed
+    }
+  );
 }
-
+ 
 
 export { initDB, cleanPhoneNumber, callQueue, extractNullValues };
