@@ -30,88 +30,115 @@ if (
   !MONGODB_URL
 ) {
   console.error("Missing required environment variables");
-  throw new Error("Missing required environment variables");
+  console.error("Required variables:", {
+    ELEVENLABS_API_KEY: !!ELEVENLABS_API_KEY,
+    ELEVENLABS_AGENT_ID: !!ELEVENLABS_AGENT_ID,
+    TWILIO_ACCOUNT_SID: !!TWILIO_ACCOUNT_SID,
+    TWILIO_AUTH_TOKEN: !!TWILIO_AUTH_TOKEN,
+    TWILIO_PHONE_NUMBER: !!TWILIO_PHONE_NUMBER,
+    MONGODB_URL: !!MONGODB_URL
+  });
+  process.exit(1);
 }
 
 // Initialize Fastify server
-const fastify = Fastify();
+const fastify = Fastify({ logger: true });
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
 const PORT = process.env.PORT || 8000;
 
-// Status callback endpoint - GELİŞTİRİLMİŞ VERSİYON
+// Initialize Twilio client
+const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+
+// Test database connection on startup
+async function testDatabaseConnection() {
+  try {
+    const database = await initDB();
+    console.log("✅ Database connection successful");
+    return true;
+  } catch (error) {
+    console.error("❌ Database connection failed:", error);
+    return false;
+  }
+}
+
+// Status callback endpoint
 fastify.post("/call-status", async (req, reply) => {
-  const { CallSid, CallStatus, AnsweredBy, CallDuration } = req.body;
-  const docId = req.body.CustomParameterDocId || req.query.docId;
-  
-  console.log(`StatusCallback for ${CallSid}:`);
-  console.log(`  - Status: ${CallStatus}`);
-  console.log(`  - AnsweredBy: ${AnsweredBy}`);
-  console.log(`  - Duration: ${CallDuration}`);
-  console.log(`  - DocId: ${docId}`);
-
-  let yeniDurum;
-  
-  // Daha detaylı durum kontrolü
-  if (["no-answer", "busy", "failed", "canceled"].includes(CallStatus)) {
-    yeniDurum = "Arandı, Açmadı";
-  } else if (CallStatus === "completed") {
-    // CallDuration kontrolü ekle
-    const duration = parseInt(CallDuration) || 0;
+  try {
+    const { CallSid, CallStatus, AnsweredBy, CallDuration } = req.body;
+    const docId = req.body.CustomParameterDocId || req.query.docId;
     
-    if (AnsweredBy === "human" && duration > 5) {
-      // İnsan açtı ve 5 saniyeden uzun konuştu
-      yeniDurum = "Arandı";
-    } else if (AnsweredBy === "machine" || AnsweredBy === "fax") {
-      // Makine veya faks açtı
+    console.log(`StatusCallback for ${CallSid}:`);
+    console.log(`  - Status: ${CallStatus}`);
+    console.log(`  - AnsweredBy: ${AnsweredBy}`);
+    console.log(`  - Duration: ${CallDuration}`);
+    console.log(`  - DocId: ${docId}`);
+
+    let yeniDurum;
+    
+    if (["no-answer", "busy", "failed", "canceled"].includes(CallStatus)) {
       yeniDurum = "Arandı, Açmadı";
-    } else if (AnsweredBy === "unknown" && duration > 15) {
-      // Bilinmeyen ama uzun süre konuşuldu - muhtemelen insan
-      yeniDurum = "Arandı";
-    } else if (AnsweredBy === "unknown" && duration <= 15) {
-      // Bilinmeyen ve kısa süre - muhtemelen makine veya cevap vermedi
-      yeniDurum = "Arandı, Açmadı";
+    } else if (CallStatus === "completed") {
+      const duration = parseInt(CallDuration) || 0;
+      
+      if (AnsweredBy === "human" && duration > 5) {
+        yeniDurum = "Arandı";
+      } else if (AnsweredBy === "machine" || AnsweredBy === "fax") {
+        yeniDurum = "Arandı, Açmadı";
+      } else if (AnsweredBy === "unknown" && duration > 15) {
+        yeniDurum = "Arandı";
+      } else if (AnsweredBy === "unknown" && duration <= 15) {
+        yeniDurum = "Arandı, Açmadı";
+      } else {
+        yeniDurum = "Arandı, Açmadı";
+      }
+    } else if (CallStatus === "answered") {
+      yeniDurum = "Arandı (Devam Ediyor)";
     } else {
-      yeniDurum = "Arandı, Açmadı";
+      yeniDurum = `Arandı (${CallStatus})`;
     }
-  } else if (CallStatus === "answered") {
-    // Answered durumunda AnsweredBy henüz gelmemiş olabilir
-    yeniDurum = "Arandı (Devam Ediyor)";
-  } else {
-    yeniDurum = `Arandı (${CallStatus})`;
-  }
 
-  console.log(`  - Yeni Durum: ${yeniDurum}`);
+    console.log(`  - Yeni Durum: ${yeniDurum}`);
 
-  if (docId) {
-    await updateCallStatus(docId, yeniDurum);
+    if (docId) {
+      await updateCallStatus(docId, yeniDurum);
+    }
+    
+    reply.send("OK");
+  } catch (error) {
+    console.error("Error in call-status endpoint:", error);
+    reply.code(500).send("Error processing status");
   }
-  
-  reply.send("OK");
 });
 
 async function updateCallStatus(docId, status) {
-  const database = await initDB();
-  const collection = database.collection("parsed_cv_data");
-  await collection.updateOne(
-    { _id: new ObjectId(docId)},
-    { $set: { durum: status, last_call_date: new Date() } }
-  );
+  try {
+    const database = await initDB();
+    const collection = database.collection("parsed_cv_data");
+    const result = await collection.updateOne(
+      { _id: new ObjectId(docId) },
+      { $set: { durum: status, last_call_date: new Date() } }
+    );
+    console.log(`Updated call status for ${docId}: ${status}`);
+    return result;
+  } catch (error) {
+    console.error("Error updating call status:", error);
+    throw error;
+  }
 }
 
 // Root route for health check
 fastify.get("/", async (_, reply) => {
-  reply.send({ message: "Server is running" });
+  reply.send({ message: "Server is running", timestamp: new Date().toISOString() });
 });
 
-// Debug endpoint - sistem durumunu kontrol et
+// Debug endpoint
 fastify.get("/debug", async (request, reply) => {
   try {
     const database = await initDB();
     const collection = database.collection("parsed_cv_data");
     
-    // Durum istatistikleri
     const stats = await collection.aggregate([
       {
         $group: {
@@ -138,6 +165,7 @@ fastify.get("/debug", async (request, reply) => {
       }
     });
   } catch (error) {
+    console.error("Debug endpoint error:", error);
     reply.code(500).send({
       success: false,
       error: error.message
@@ -145,12 +173,8 @@ fastify.get("/debug", async (request, reply) => {
   }
 });
 
-// Initialize Twilio client
-const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-
-// Client tools definition - bu kısım önemli
+// Client tools definition
 const clientTools = {
-  // ElevenLabs snake_case kullanıyor, o yüzden tool isimlerini ona göre ayarlıyoruz
   extract_null_values: async ({ docId }) => {
     console.log(`[Tool] Executing extract_null_values with docId: ${docId}`);
     try {
@@ -163,12 +187,11 @@ const clientTools = {
     }
   },
 
-  hello: () =>{
+  hello: () => {
     console.log("[Tool] Hello tool called");
     return "Hello from the tool!";
   },
   
-  // Örnek: Müşteri detaylarını getir
   get_customer_details: async ({ docId }) => {
     console.log(`[Tool] Getting customer details for docId: ${docId}`);
     try {
@@ -193,7 +216,6 @@ const clientTools = {
     }
   },
   
-  // Log mesajı için tool
   log_message: async ({ message }) => {
     console.log(`[Tool] Agent Log: ${message}`);
     return { success: true, logged: message };
@@ -203,7 +225,6 @@ const clientTools = {
 // Helper function to get signed URL for authenticated conversations
 async function getSignedUrl(docId = null) {
   try {
-    // Tool'ları query parametresi olarak gönder
     const toolsParam = encodeURIComponent(JSON.stringify({
       extract_null_values: {
         description: "Extract null or empty values from customer data",
@@ -236,7 +257,8 @@ async function getSignedUrl(docId = null) {
     );
 
     if (!response.ok) {
-      throw new Error(`Failed to get signed URL: ${response.statusText}`);
+      const errorText = await response.text();
+      throw new Error(`Failed to get signed URL: ${response.status} ${response.statusText} - ${errorText}`);
     }
 
     const data = await response.json();
@@ -247,15 +269,15 @@ async function getSignedUrl(docId = null) {
   }
 }
 
-// Route to initiate single outbound call - GELİŞTİRİLMİŞ VERSİYON
+// Route to initiate single outbound call
 fastify.post("/outbound-call", async (request, reply) => {
-  const { number } = request.body;
-
-  if (!number) {
-    return reply.code(400).send({ error: "Phone number is required" });
-  }
-
   try {
+    const { number } = request.body;
+
+    if (!number) {
+      return reply.code(400).send({ error: "Phone number is required" });
+    }
+
     const call = await twilioClient.calls.create({
       from: TWILIO_PHONE_NUMBER,
       to: number,
@@ -264,11 +286,11 @@ fastify.post("/outbound-call", async (request, reply) => {
       statusCallbackEvent: ["initiated", "ringing", "answered", "completed", "no-answer", "busy", "failed", "canceled"],
       statusCallbackMethod: "POST",
       machineDetection: "Enable",
-      machineDetectionTimeout: 30, // 30 saniye makine tespiti
-      machineDetectionSpeechThreshold: 2400, // 2.4 saniye konuşma eşiği
-      machineDetectionSpeechEndThreshold: 1200, // 1.2 saniye sessizlik eşiği
-      machineDetectionSilenceTimeout: 5000, // 5 saniye sessizlik timeout
-      timeout: 60 // Toplam arama timeout 60 saniye
+      machineDetectionTimeout: 30,
+      machineDetectionSpeechThreshold: 2400,
+      machineDetectionSpeechEndThreshold: 1200,
+      machineDetectionSilenceTimeout: 5000,
+      timeout: 60
     });
 
     reply.send({
@@ -280,100 +302,160 @@ fastify.post("/outbound-call", async (request, reply) => {
     console.error("Error initiating outbound call:", error);
     reply.code(500).send({
       success: false,
-      error: "Failed to initiate call",
+      error: error.message,
     });
   }
 });
 
-// Route to initiate bulk calls from database - GELİŞTİRİLMİŞ VERSİYON
-fastify.post("/bulk-calls", async (request, reply) => {
-  // Body'den parametreleri al
-  const {
-    numbers = [],
-    concurrent = false,
-    delay = 5000
-  } = request.body;
+// Route to initiate bulk calls from database
+fastify.post("/advanced-calls", async (request, reply) => {
+  try {
+    const { 
+      concurrent = false,
+      waitForCompletion = true, 
+      delayBetweenCalls = 60000,
+      maxWaitTime = 180000,
+      numbers = []
+    } = request.body;
 
-  // Kuyruğu belirle: manuel numbers veya veritabanından
-  let queue;
-  if (Array.isArray(numbers) && numbers.length > 0) {
-    queue = numbers.map(n => ({ number: n, docId: null, name: null }));
-  } else {
-    queue = await callQueue();
-  }
+    console.log(`[Advanced Calls] Starting ${concurrent ? 'concurrent' : 'sequential'} calls`);
 
-  if (queue.length === 0) {
-    return reply.send({
-      success: true,
-      message: "No numbers to call",
-      total: 0,
-      results: []
-    });
-  }
+    let queue;
+    if (Array.isArray(numbers) && numbers.length > 0) {
+      queue = numbers.map(n => ({ number: n, docId: null, name: null }));
+    } else {
+      queue = await callQueue();
+    }
 
-  const host = request.headers.host;
-  let results = [];
+    if (queue.length === 0) {
+      return reply.send({
+        success: true,
+        message: "No numbers to call",
+        total: 0,
+        results: []
+      });
+    }
 
-  if (concurrent) {
-    // Paralel tüm aramaları başlat
-    const callPromises = queue.map(({ number, docId, name }) =>
-      twilioClient.calls.create({
-        from: TWILIO_PHONE_NUMBER,
-        to: number,
-        url: `https://${host}/outbound-call-twiml?docId=${docId}&name=${encodeURIComponent(name)}`,
-        statusCallback: `https://${host}/call-status?docId=${docId}`,
-        statusCallbackEvent: ["initiated", "ringing", "answered", "completed", "no-answer", "busy", "failed", "canceled"],
-        statusCallbackMethod: "POST",
-        machineDetection: "Enable",
-        machineDetectionTimeout: 30,
-        machineDetectionSpeechThreshold: 2400,
-        machineDetectionSpeechEndThreshold: 1200,
-        machineDetectionSilenceTimeout: 5000,
-        timeout: 60
-      })
-      .then(call => {
-        return { number, name, callSid: call.sid, status: "queued" };
-      })
-      .catch(err => ({ number, name, status: "failed", error: err.message }))
-    );
-    results = await Promise.all(callPromises);
-  } else {
-    // Sıralı arama
-    for (let i = 0; i < queue.length; i++) {
-      const { number, docId, name } = queue[i];
-      try {
-        const call = await twilioClient.calls.create({
-          from: TWILIO_PHONE_NUMBER,
-          to: number,
-          url: `https://${host}/outbound-call-twiml?docId=${docId}&name=${encodeURIComponent(name)}`,
-          statusCallback: `https://${host}/call-status?docId=${docId}`,
-          statusCallbackEvent: ["initiated", "ringing", "answered", "completed", "no-answer", "busy", "failed", "canceled"],
-          statusCallbackMethod: "POST",
-          machineDetection: "Enable",
-          machineDetectionTimeout: 30,
-          machineDetectionSpeechThreshold: 2400,
-          machineDetectionSpeechEndThreshold: 1200,
-          machineDetectionSilenceTimeout: 5000,
-          timeout: 60
-        });
+    const host = request.headers.host;
+    let results = [];
 
-        results.push({ number, name, callSid: call.sid, status: "queued" });
-        if (i < queue.length - 1) await new Promise(r => setTimeout(r, delay));
-      } catch (err) {
-        results.push({ number, name, status: "failed", error: err.message });
+    if (concurrent) {
+      const callPromises = queue.map(async ({ number, docId, name }) => {
+        try {
+          const call = await twilioClient.calls.create({
+            from: TWILIO_PHONE_NUMBER,
+            to: number,
+            url: `https://${host}/outbound-call-twiml?docId=${docId}&name=${encodeURIComponent(name || '')}`,
+            statusCallback: `https://${host}/call-status?docId=${docId}`,
+            statusCallbackEvent: ["initiated", "ringing", "answered", "completed", "no-answer", "busy", "failed", "canceled"],
+            statusCallbackMethod: "POST",
+            machineDetection: "Enable",
+            machineDetectionTimeout: 30,
+            machineDetectionSpeechThreshold: 2400,
+            machineDetectionSpeechEndThreshold: 1200,
+            machineDetectionSilenceTimeout: 5000,
+            timeout: 60
+          });
+
+          let finalStatus = "initiated";
+          if (waitForCompletion) {
+            finalStatus = await waitForCallCompletion(call.sid, maxWaitTime);
+          }
+
+          return { number, name, callSid: call.sid, status: finalStatus };
+        } catch (err) {
+          console.error(`[Advanced Calls] Concurrent call failed: ${number} - ${err.message}`);
+          return { number, name, status: "failed", error: err.message };
+        }
+      });
+
+      results = await Promise.all(callPromises);
+    } else {
+      for (let i = 0; i < queue.length; i++) {
+        const { number, docId, name } = queue[i];
+        
+        try {
+          const call = await twilioClient.calls.create({
+            from: TWILIO_PHONE_NUMBER,
+            to: number,
+            url: `https://${host}/outbound-call-twiml?docId=${docId}&name=${encodeURIComponent(name || '')}`,
+            statusCallback: `https://${host}/call-status?docId=${docId}`,
+            statusCallbackEvent: ["initiated", "ringing", "answered", "completed", "no-answer", "busy", "failed", "canceled"],
+            statusCallbackMethod: "POST",
+            machineDetection: "Enable",
+            machineDetectionTimeout: 30,
+            machineDetectionSpeechThreshold: 2400,
+            machineDetectionSpeechEndThreshold: 1200,
+            machineDetectionSilenceTimeout: 5000,
+            timeout: 60
+          });
+
+          let finalStatus = "initiated";
+          if (waitForCompletion) {
+            finalStatus = await waitForCallCompletion(call.sid, maxWaitTime);
+          }
+
+          results.push({ number, name, callSid: call.sid, status: finalStatus });
+
+          if (i < queue.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, delayBetweenCalls));
+          }
+        } catch (err) {
+          console.error(`[Advanced Calls] Sequential call failed: ${number} - ${err.message}`);
+          results.push({ number, name, status: "failed", error: err.message });
+          
+          if (i < queue.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, delayBetweenCalls));
+          }
+        }
       }
     }
-  }
 
-  return reply.send({
-    success: true,
-    message: "Bulk calls completed",
-    total: queue.length,
-    successful: results.filter(r => r.status === "queued").length,
-    failed: results.filter(r => r.status === "failed").length,
-    results
-  });
+    const successful = results.filter(r => r.status !== "failed").length;
+    const failed = results.filter(r => r.status === "failed").length;
+
+    return reply.send({
+      success: true,
+      message: `Advanced calls completed - ${concurrent ? 'concurrent' : 'sequential'} mode`,
+      mode: concurrent ? 'concurrent' : 'sequential',
+      total: queue.length,
+      successful,
+      failed,
+      waitedForCompletion: waitForCompletion,
+      delayBetweenCalls: concurrent ? 0 : delayBetweenCalls,
+      results
+    });
+  } catch (error) {
+    console.error("Error in advanced-calls:", error);
+    reply.code(500).send({
+      success: false,
+      error: error.message
+    });
+  }
 });
+
+// Helper function to wait for call completion
+async function waitForCallCompletion(callSid, maxWaitTime) {
+  const startTime = Date.now();
+  const pollInterval = 5000;
+  
+  while (Date.now() - startTime < maxWaitTime) {
+    try {
+      const call = await twilioClient.calls(callSid).fetch();
+      
+      if (['completed', 'failed', 'canceled', 'no-answer', 'busy'].includes(call.status)) {
+        return call.status;
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+    } catch (error) {
+      console.error(`[Wait] Error checking call ${callSid}:`, error);
+      break;
+    }
+  }
+  
+  return 'timeout';
+}
 
 // Route to get call queue status
 fastify.get("/call-queue", async (request, reply) => {
@@ -388,36 +470,40 @@ fastify.get("/call-queue", async (request, reply) => {
     console.error("Error getting call queue:", error);
     reply.code(500).send({
       success: false,
-      error: "Failed to get call queue"
+      error: error.message
     });
   }
 });
 
 // TwiML route for outbound calls
 fastify.all("/outbound-call-twiml", async (request, reply) => {
-  const docId = request.query.docId || "";
-  const name = decodeURIComponent(request.query.name || "");
+  try {
+    const docId = request.query.docId || "";
+    const name = decodeURIComponent(request.query.name || "");
 
-  console.log(`[TwiML] Webhook called for ${name} (docId: ${docId}) - Host: ${request.headers.host}`);
+    console.log(`[TwiML] Webhook called for ${name} (docId: ${docId})`);
 
-  // WebSocket URL'ini kontrol et
-  const wsUrl = `wss://${request.headers.host}/outbound-media-stream`;
-  console.log(`[TwiML] WebSocket URL: ${wsUrl}`);
+    const wsUrl = `wss://${request.headers.host}/outbound-media-stream`;
+    console.log(`[TwiML] WebSocket URL: ${wsUrl}`);
 
-  const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
-      <Response>
-        <Connect>
-          <Stream url="${wsUrl}">
-            <Parameter name="docId" value="${docId}" />
-            <Parameter name="name" value="${name}" />
-          </Stream>
-        </Connect>
-      </Response>`;
+    const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+          <Connect>
+            <Stream url="${wsUrl}">
+              <Parameter name="docId" value="${docId}" />
+              <Parameter name="name" value="${name}" />
+            </Stream>
+          </Connect>
+        </Response>`;
 
-  reply.type("text/xml").send(twimlResponse);
+    reply.type("text/xml").send(twimlResponse);
+  } catch (error) {
+    console.error("Error in TwiML endpoint:", error);
+    reply.code(500).send("Error generating TwiML");
+  }
 });
 
-// WebSocket route for handling media streams - DÜZELTİLMİŞ VERSİYON
+// WebSocket route for handling media streams
 fastify.register(async fastifyInstance => {
   fastifyInstance.get(
     "/outbound-media-stream",
@@ -425,16 +511,15 @@ fastify.register(async fastifyInstance => {
     (ws, req) => {
       console.info("[Server] Twilio connected to outbound media stream");      
 
-      // Variables to track the call
       let streamSid = null;
       let callSid = null;
       let elevenLabsWs = null;
       let customParameters = null;
 
-      // Handle WebSocket errors
-      ws.on("error", console.error);
+      ws.on("error", (error) => {
+        console.error("[WebSocket] Error:", error);
+      });
 
-      // Set up ElevenLabs connection
       const setupElevenLabs = async () => {
         try {
           const docId = customParameters?.docId;
@@ -442,8 +527,8 @@ fastify.register(async fastifyInstance => {
           elevenLabsWs = new WebSocket(signedUrl);
 
           elevenLabsWs.on("open", () => {
-            console.log("[ElevenLabs] Connected to Conversational AI");
-            console.log(`[ElevenLabs] Calling ${customParameters?.docId || 'Unknown'} - Using agent configuration from ElevenLabs`);
+            console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 🔗 ElevenLabs: Connected to Conversational AI`);
+            console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 📞 Calling: ${customParameters?.name || 'Unknown'} (docId: ${customParameters?.docId || 'N/A'})`);
           });
 
           elevenLabsWs.on("message", async (data) => {
@@ -476,69 +561,57 @@ fastify.register(async fastifyInstance => {
                       };
                       ws.send(JSON.stringify(audioData));
                     }
-                  } else {
-                    console.log(
-                      "[ElevenLabs] Received audio but no StreamSid yet"
-                    );
                   }
                   break;
 
                 case "interruption":
                   if (streamSid) {
-                    ws.send(
-                      JSON.stringify({
-                        event: "clear",
-                        streamSid,
-                      })
-                    );
+                    ws.send(JSON.stringify({
+                      event: "clear",
+                      streamSid,
+                    }));
                   }
                   break;
 
                 case "ping":
                   if (message.ping_event?.event_id) {
-                    elevenLabsWs.send(
-                      JSON.stringify({
-                        type: "pong",
-                        event_id: message.ping_event.event_id,
-                      })
-                    );
+                    elevenLabsWs.send(JSON.stringify({
+                      type: "pong",
+                      event_id: message.ping_event.event_id,
+                    }));
                   }
                   break;
 
                 case "agent_response":
-                  console.log(
-                    `[${customParameters?.docId || 'Unknown'}] Agent response: ${message.agent_response_event?.agent_response}`
-                  );
+                  console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 🤖 Agent: ${message.agent_response_event?.agent_response}`);
                   break;
 
                 case "user_transcript":
-                  console.log(
-                    `[${customParameters?.docId || 'Unknown'}] User transcript: ${message.user_transcription_event?.user_transcript}`
-                  );
+                  console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 👤 User: ${message.user_transcription_event?.user_transcript}`);
                   break;
 
                 case "tool_response":
-                  console.log("[ElevenLabs] Tool response received:", message);
+                  console.log("[ElevenLabs] 🔧 Tool response received:", message);
                   break;
 
                 case "client_tool_call":
-                  console.log("[ElevenLabs] Client tool call received:", message);
+                  console.log("[ElevenLabs] 🔧 Client tool call received:", message);
                   
                   const toolName = message.client_tool_call?.tool_name;
                   const toolCallId = message.client_tool_call?.tool_call_id;
                   const parameters = message.client_tool_call?.parameters || {};
                   
+                  console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 🔧 Tool Called: ${toolName} with parameters:`, parameters);
+                  
                   if (clientTools[toolName]) {
                     try {
-                      console.log(`[Tool] Executing ${toolName} with parameters:`, parameters);
-                      
-                      // DocId'yi customParameters'den al ve parametrelere ekle
                       const docId = customParameters?.docId;
                       if (docId && !parameters.docId) {
                         parameters.docId = docId;
                       }
                       
                       const result = await clientTools[toolName](parameters);
+                      console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 🔧 Tool Result: ${toolName} returned:`, result);
                       
                       const toolResponse = {
                         type: "client_tool_result",
@@ -548,9 +621,8 @@ fastify.register(async fastifyInstance => {
                       };
                       
                       elevenLabsWs.send(JSON.stringify(toolResponse));
-                      console.log(`[Tool] ${toolName} response sent to ElevenLabs`);
                     } catch (error) {
-                      console.error(`[Tool] Error executing ${toolName}:`, error);
+                      console.error(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] ❌ Tool Error: ${toolName} failed:`, error);
                       
                       const errorResponse = {
                         type: "client_tool_result",
@@ -562,23 +634,16 @@ fastify.register(async fastifyInstance => {
                       elevenLabsWs.send(JSON.stringify(errorResponse));
                     }
                   } else {
-                    console.error(`[Tool] Unknown tool: ${toolName}`);
-                    
-                    const errorResponse = {
-                      type: "client_tool_result",
-                      tool_call_id: toolCallId,
-                      result: JSON.stringify({ error: `Unknown tool: ${toolName}` }),
-                      is_error: true
-                    };
-                    
-                    elevenLabsWs.send(JSON.stringify(errorResponse));
+                    console.error(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] ❌ Unknown tool: ${toolName}`);
                   }
                   break;
 
                 default:
-                  console.log(
-                    `[ElevenLabs] Unhandled message type: ${message.type}`, message
-                  );
+                  // Diğer mesaj tiplerini de logla
+                  if (message.type) {
+                    console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 📨 ElevenLabs Message: ${message.type}`, message);
+                  }
+                  break;
               }
             } catch (error) {
               console.error("[ElevenLabs] Error processing message:", error);
@@ -590,20 +655,16 @@ fastify.register(async fastifyInstance => {
           });
 
           elevenLabsWs.on("close", () => {
-            console.log(`[ElevenLabs] Disconnected from ${customParameters?.docId || 'Unknown'}`);        
+            console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 🔗 ElevenLabs: Disconnected from Conversational AI`);        
           });
         } catch (error) {
           console.error("[ElevenLabs] Setup error:", error);
         }
       };
 
-      // Handle messages from Twilio
       ws.on("message", message => {
         try {
           const msg = JSON.parse(message);
-          if (msg.event !== "media") {
-            console.log(`[Twilio] Received event: ${msg.event}`);
-          }
 
           switch (msg.event) {
             case "start":
@@ -611,45 +672,39 @@ fastify.register(async fastifyInstance => {
               callSid = msg.start.callSid;
               customParameters = msg.start.customParameters;
               
-              // AnsweredBy kontrolü KALDIRILDI - bu bilgi WebSocket'te doğru şekilde mevcut değil
-              // Status callback'te yapılacak
-              
               setupElevenLabs();
-              console.log(
-                `[Twilio] Stream started for ${customParameters?.docId || 'Unknown'} (docId: ${customParameters?.docId || 'N/A'}) - StreamSid: ${streamSid}, CallSid: ${callSid}`
-              );
+              console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 🔗 Twilio: Stream started - StreamSid: ${streamSid}, CallSid: ${callSid}`);
               break;
 
             case "media":
               if (elevenLabsWs?.readyState === WebSocket.OPEN) {
                 const audioMessage = {
-                  user_audio_chunk: Buffer.from(
-                    msg.media.payload,
-                    "base64"
-                  ).toString("base64"),
+                  user_audio_chunk: Buffer.from(msg.media.payload, "base64").toString("base64"),
                 };
                 elevenLabsWs.send(JSON.stringify(audioMessage));
               }
               break;
 
             case "stop":
-              console.log(`[Twilio] Stream ${streamSid} ended for ${customParameters?.docId || 'Unknown'}`);
+              console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 🔗 Twilio: Stream ${streamSid} ended`);
               if (elevenLabsWs?.readyState === WebSocket.OPEN) {
                 elevenLabsWs.close();
               }
               break;
 
             default:
-              console.log(`[Twilio] Unhandled event: ${msg.event}`);
+              if (msg.event !== "media") {
+                console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 📨 Twilio Event: ${msg.event}`, msg);
+              }
+              break;
           }
         } catch (error) {
           console.error("[Twilio] Error processing message:", error);
         }
       });
 
-      // Handle WebSocket closure
       ws.on("close", () => {
-        console.log(`[Twilio] Client disconnected for ${customParameters?.docId || 'Unknown'}`);
+        console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 🔗 Twilio: Client disconnected`);
         if (elevenLabsWs?.readyState === WebSocket.OPEN) {
           elevenLabsWs.close();
         }
@@ -658,14 +713,37 @@ fastify.register(async fastifyInstance => {
   );
 });
 
-// Initialize database connection on startup
-initDB().catch(console.error);
+// Initialize and start server
+async function startServer() {
+  try {
+    // Test database connection
+    const dbConnected = await testDatabaseConnection();
+    if (!dbConnected) {
+      console.error("❌ Cannot start server - database connection failed");
+      process.exit(1);
+    }
 
-// Start the Fastify server
-fastify.listen({ port: PORT }, err => {
-  if (err) {
-    console.error("Error starting server:", err);
+    // Start server
+    await fastify.listen({ port: PORT, host: '0.0.0.0' });
+    console.log(`✅ Server started successfully on port ${PORT}`);
+  } catch (error) {
+    console.error("❌ Error starting server:", error);
     process.exit(1);
   }
-  console.log(`[Server] Listening on port ${PORT}`);
+}
+
+// Handle graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, shutting down gracefully');
+  await fastify.close();
+  process.exit(0);
 });
+
+process.on('SIGINT', async () => {
+  console.log('SIGINT received, shutting down gracefully');
+  await fastify.close();
+  process.exit(0);
+});
+
+// Start the server
+startServer();
