@@ -5,7 +5,7 @@ import fastifyFormBody from "@fastify/formbody";
 import fastifyWs from "@fastify/websocket";
 import Twilio from "twilio";
 import { MongoClient, ObjectId } from "mongodb";
-import { callQueue, initDB, extractNullValues } from "./functions.js";
+import { callQueue, initDB, extractNullValues, saveCallRecord } from "./functions.js";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -515,6 +515,9 @@ fastify.register(async fastifyInstance => {
       let callSid = null;
       let elevenLabsWs = null;
       let customParameters = null;
+      let callRecord = []; 
+      let isCallRecordSaved = false;
+
 
       ws.on("error", (error) => {
         console.error("[WebSocket] Error:", error);
@@ -584,10 +587,20 @@ fastify.register(async fastifyInstance => {
 
                 case "agent_response":
                   console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 🤖 Agent: ${message.agent_response_event?.agent_response}`);
+                  callRecord.push({
+                    type: 'agent',
+                    message: message.agent_response_event?.agent_response,
+                    timestamp: new Date()
+                  });
                   break;
 
                 case "user_transcript":
                   console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 👤 User: ${message.user_transcription_event?.user_transcript}`);
+                  callRecord.push({
+                    type: 'user',
+                    message: message.user_transcription_event?.user_transcript,
+                    timestamp: new Date()
+                  });
                   break;
 
                 case "tool_response":
@@ -654,8 +667,19 @@ fastify.register(async fastifyInstance => {
             console.error("[ElevenLabs] WebSocket error:", error);
           });
 
-          elevenLabsWs.on("close", () => {
-            console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 🔗 ElevenLabs: Disconnected from Conversational AI`);        
+          elevenLabsWs.on("close", async () => {
+            console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 🔗 ElevenLabs: Disconnected from Conversational AI`);
+            
+            // Konuşma bittiğinde call record'ı kaydet
+            if (callRecord.length > 0 && customParameters?.docId) {
+              try {
+                await saveCallRecord(customParameters.docId, callRecord);
+                isCallRecordSaved = true;
+                console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] ✅ Call record saved successfully`);
+              } catch (error) {
+                console.error(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] ❌ Error saving call record:`, error);
+              }
+            }
           });
         } catch (error) {
           console.error("[ElevenLabs] Setup error:", error);
@@ -703,11 +727,22 @@ fastify.register(async fastifyInstance => {
         }
       });
 
-      ws.on("close", () => {
+      ws.on("close", async () => {
         console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 🔗 Twilio: Client disconnected`);
         if (elevenLabsWs?.readyState === WebSocket.OPEN) {
           elevenLabsWs.close();
         }
+        
+        // Twilio bağlantısı kapandığında da call record'ı kaydet (eğer henüz kaydedilmemişse)
+        //if (callRecord.length > 0 && customParameters?.docId && !isCallRecordSaved) {
+        //  try { 
+        //    await saveCallRecord(customParameters.docId, callRecord);
+        //    isCallRecordSaved = true;
+        //    console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] ✅ Call record saved on Twilio disconnect`);
+        //  } catch (error) {
+        //    console.error(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] ❌ Error saving call record on disconnect:`, error);
+        //  }
+        //}
       });
     }
   );

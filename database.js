@@ -39,3 +39,24 @@ export async function connectToMongoDB() {
     return null;
   }
 }
+
+async function saveCallRecord(candidateId, callRecord) {
+  try {
+    const database = await initDB();
+    const collection = database.collection("call_records");
+    
+    const record = {
+      candidateId: candidateId,
+      callRecord: callRecord,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    
+    const result = await collection.insertOne(record);
+    console.log(`✅ Call record saved for candidate ${candidateId}:`, result.insertedId);
+    return result;
+  } catch (error) {
+    console.error("❌ Error saving call record:", error);
+    throw error;
+  }
+}
