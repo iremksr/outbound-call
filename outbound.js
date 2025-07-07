@@ -5,7 +5,8 @@ import fastifyFormBody from "@fastify/formbody";
 import fastifyWs from "@fastify/websocket";
 import Twilio from "twilio";
 import { MongoClient, ObjectId } from "mongodb";
-import { callQueue, initDB, extractNullValues, saveCallRecord } from "./functions.js";
+import { callQueue, extractNullValues } from "./functions.js";
+import { initDB, saveCallRecord, updateCallStatus, testDatabaseConnection } from "./database.js";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -51,17 +52,6 @@ const PORT = process.env.PORT || 8000;
 // Initialize Twilio client
 const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-// Test database connection on startup
-async function testDatabaseConnection() {
-  try {
-    const database = await initDB();
-    console.log("✅ Database connection successful");
-    return true;
-  } catch (error) {
-    console.error("❌ Database connection failed:", error);
-    return false;
-  }
-}
 
 // Status callback endpoint
 fastify.post("/call-status", async (req, reply) => {
@@ -112,26 +102,12 @@ fastify.post("/call-status", async (req, reply) => {
   }
 });
 
-async function updateCallStatus(docId, status) {
-  try {
-    const database = await initDB();
-    const collection = database.collection("parsed_cv_data");
-    const result = await collection.updateOne(
-      { _id: new ObjectId(docId) },
-      { $set: { durum: status, last_call_date: new Date() } }
-    );
-    console.log(`Updated call status for ${docId}: ${status}`);
-    return result;
-  } catch (error) {
-    console.error("Error updating call status:", error);
-    throw error;
-  }
-}
 
 // Root route for health check
 fastify.get("/", async (_, reply) => {
   reply.send({ message: "Server is running", timestamp: new Date().toISOString() });
 });
+
 
 // Debug endpoint
 fastify.get("/debug", async (request, reply) => {
@@ -173,6 +149,7 @@ fastify.get("/debug", async (request, reply) => {
   }
 });
 
+
 // Client tools definition
 const clientTools = {
   extract_null_values: async ({ docId }) => {
@@ -185,40 +162,6 @@ const clientTools = {
       console.error(`[Tool] Error in extract_null_values:`, error);
       throw error;
     }
-  },
-
-  hello: () => {
-    console.log("[Tool] Hello tool called");
-    return "Hello from the tool!";
-  },
-  
-  get_customer_details: async ({ docId }) => {
-    console.log(`[Tool] Getting customer details for docId: ${docId}`);
-    try {
-      const database = await initDB();
-      const collection = database.collection("parsed_cv_data");
-      const customer = await collection.findOne({ _id: new ObjectId(docId) });
-      
-      if (!customer) {
-        return { error: "Customer not found" };
-      }
-      
-      return {
-        id: customer._id,
-        name: customer.name || "Unknown",
-        phone: customer.phone || "Unknown",
-        email: customer.email || "Unknown",
-        status: customer.durum || "Unknown"
-      };
-    } catch (error) {
-      console.error(`[Tool] Error getting customer details:`, error);
-      return { error: error.message };
-    }
-  },
-  
-  log_message: async ({ message }) => {
-    console.log(`[Tool] Agent Log: ${message}`);
-    return { success: true, logged: message };
   }
 };
 
@@ -227,21 +170,9 @@ async function getSignedUrl(docId = null) {
   try {
     const toolsParam = encodeURIComponent(JSON.stringify({
       extract_null_values: {
-        description: "Extract null or empty values from customer data",
+        description: "Extract null or empty values from candidate data, and return the parsed data of the candidate.",
         parameters: {
           docId: { type: "string", description: "Document ID to extract data from" }
-        }
-      },
-      get_customer_details: {
-        description: "Get customer details from database",
-        parameters: {
-          docId: { type: "string", description: "Document ID of the customer" }
-        }
-      },
-      log_message: {
-        description: "Log a message",
-        parameters: {
-          message: { type: "string", description: "Message to log" }
         }
       }
     }));
@@ -732,17 +663,6 @@ fastify.register(async fastifyInstance => {
         if (elevenLabsWs?.readyState === WebSocket.OPEN) {
           elevenLabsWs.close();
         }
-        
-        // Twilio bağlantısı kapandığında da call record'ı kaydet (eğer henüz kaydedilmemişse)
-        //if (callRecord.length > 0 && customParameters?.docId && !isCallRecordSaved) {
-        //  try { 
-        //    await saveCallRecord(customParameters.docId, callRecord);
-        //    isCallRecordSaved = true;
-        //    console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] ✅ Call record saved on Twilio disconnect`);
-        //  } catch (error) {
-        //    console.error(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] ❌ Error saving call record on disconnect:`, error);
-        //  }
-        //}
       });
     }
   );
