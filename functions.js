@@ -36,8 +36,9 @@ async function callQueue() {
   await cursor.forEach(doc => {
     const raw = doc.parsed_data?.["Kişisel Bilgiler"]?.["Telefon Numarası"];
     const number = cleanPhoneNumber(raw);
+    const name = doc.parsed_data?.["Kişisel Bilgiler"]?.["Ad Soyad"] || "Bulunamadı";
     if (number) {
-      queue.push({ number, docId: doc._id });
+      queue.push({ number, docId: doc._id, name});
     }
   });
 

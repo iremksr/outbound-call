@@ -6,7 +6,7 @@ import fastifyWs from "@fastify/websocket";
 import Twilio from "twilio";
 import { MongoClient, ObjectId } from "mongodb";
 import { callQueue, extractNullValues } from "./functions.js";
-import { initDB, saveCallRecord, updateCallStatus, testDatabaseConnection } from "./database.js";
+import { initDB, saveCallRecord, updateCallStatus } from "./database.js";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -221,7 +221,7 @@ fastify.post("/outbound-call", async (request, reply) => {
       machineDetectionSpeechThreshold: 2400,
       machineDetectionSpeechEndThreshold: 1200,
       machineDetectionSilenceTimeout: 5000,
-      timeout: 60
+      timeout: 40
     });
 
     reply.send({
@@ -318,7 +318,7 @@ fastify.post("/advanced-calls", async (request, reply) => {
             machineDetectionSpeechThreshold: 2400,
             machineDetectionSpeechEndThreshold: 1200,
             machineDetectionSilenceTimeout: 5000,
-            timeout: 60
+            timeout: 40
           });
 
           let finalStatus = "initiated";
@@ -447,7 +447,6 @@ fastify.register(async fastifyInstance => {
       let elevenLabsWs = null;
       let customParameters = null;
       let callRecord = []; 
-      let isCallRecordSaved = false;
 
 
       ws.on("error", (error) => {
@@ -672,11 +671,7 @@ fastify.register(async fastifyInstance => {
 async function startServer() {
   try {
     // Test database connection
-    const dbConnected = await testDatabaseConnection();
-    if (!dbConnected) {
-      console.error("❌ Cannot start server - database connection failed");
-      process.exit(1);
-    }
+    const dbConnected = await initDB();
 
     // Start server
     await fastify.listen({ port: PORT, host: '0.0.0.0' });

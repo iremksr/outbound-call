@@ -23,26 +23,20 @@ async function initDB() {
       useNewUrlParser: true,
       useUnifiedTopology: true
     });
-    await dbClient.connect();
-    db = dbClient.db(DATABASE_NAME);
-    // Bağlantı testi
-    await db.command({ ping: 1 });
-    console.log(`MongoDB bağlantısı başarılı: ${DATABASE_NAME}`);
+    try {
+      await dbClient.connect();
+      db = dbClient.db(DATABASE_NAME);
+      // Bağlantı testi
+      await db.command({ ping: 1 });
+      console.log(`✅ MongoDB bağlantısı başarılı: ${DATABASE_NAME}`);
+    } catch (error) {
+      console.error("❌ MongoDB bağlantısı başarısız:", error);
+      throw error;
+    }
   }
   return db;
 }
 
-// Test database connection on startup
-async function testDatabaseConnection() {
-  try {
-    const database = await initDB();
-    console.log("✅ Database connection successful");
-    return true;
-  } catch (error) {
-    console.error("❌ Database connection failed:", error);
-    return false;
-  }
-}
 
 async function saveCallRecord(docId, callRecord) {
   console.log("🔍 saveCallRecord called with:", { docId, callRecordLength: callRecord?.length });
@@ -118,4 +112,4 @@ async function updateCallStatus(docId, status) {
   }
 }
 
-export { initDB, saveCallRecord, updateCallStatus, testDatabaseConnection};
+export { initDB, saveCallRecord, updateCallStatus};
