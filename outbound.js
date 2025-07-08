@@ -447,6 +447,7 @@ fastify.register(async fastifyInstance => {
       let elevenLabsWs = null;
       let customParameters = null;
       let callRecord = []; 
+      isCallRecordSaved = false;
 
 
       ws.on("error", (error) => {
@@ -461,7 +462,16 @@ fastify.register(async fastifyInstance => {
 
           elevenLabsWs.on("open", () => {
             console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 🔗 ElevenLabs: Connected to Conversational AI`);
-            console.log(`[${customParameters?.name || customParameters?.docId || 'Unknown'}] 📞 Calling: ${customParameters?.name || 'Unknown'} (docId: ${customParameters?.docId || 'N/A'})`);
+            const initialConfig = {
+              type: "conversation_initiation_client_data",
+              conversation_config_override: {
+                agent: {
+                  first_message: `Merhaba ben eyay Studio CV doğrulama asistanı İrem. ${customParameters?.name || "adayımız"} ile mi görüşüyorum acaba?`,
+                },
+              },
+            };
+
+            elevenLabsWs.send(JSON.stringify(initialConfig));
           });
 
           elevenLabsWs.on("message", async (data) => {
